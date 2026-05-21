@@ -3,14 +3,16 @@ House Price Prediction — Streamlit demo
 Self-contained: retrains model on startup so no .joblib files needed.
 Run with:  streamlit run app.py
 """
+import os
+import warnings
 import streamlit as st
 import pandas as pd
 import numpy as np
-import warnings
 warnings.filterwarnings('ignore')
 from datetime import date
 
-APP_DIR = os.path.dirname(os.path.abspath(__file__))   # ← ADD THIS
+# Always find housing_enriched.csv next to this app.py file
+APP_DIR = os.path.dirname(os.path.abspath(__file__))
 
 # =========================================================
 # PAGE CONFIG
@@ -22,25 +24,22 @@ st.set_page_config(
 )
 
 # =========================================================
-# TRAIN MODEL ON STARTUP (cached — only runs once per session)
+# TRAIN MODEL ON STARTUP
 # =========================================================
 @st.cache_resource
 def train_model():
-    """
-    Load data, clean, and train the XGBoost pipeline.
-    @st.cache_resource means this only runs ONCE when the app starts,
-    then the result is reused for every subsequent interaction.
-    """
     from sklearn.model_selection import train_test_split
     from sklearn.pipeline import Pipeline
     from sklearn.compose import ColumnTransformer
     from sklearn.preprocessing import StandardScaler
     from xgboost import XGBRegressor
 
-    # ---- Clean ----
-    df = pd.read_csv(os.path.join(APP_DIR, "housing_enriched.csv"))  # ← CHANGE THIS
+    # ---- Load using absolute path ----
+    csv_path = os.path.join(APP_DIR, "housing_enriched.csv")
+    df = pd.read_csv(csv_path)
     df.columns = df.columns.str.strip()
     df = df[df['Y = Sold price'] != 'Contact agent'].copy()
+
     df['price'] = (
         df['Y = Sold price']
           .str.replace('$', '', regex=False)
@@ -62,7 +61,6 @@ def train_model():
     X = df.drop(columns=['log_price'])
     X_train, _, y_train, _ = train_test_split(X, y, test_size=0.2, random_state=42)
 
-    # ---- Pipeline ----
     numeric_features = [
         'Latitude', 'Longitude',
         'Bedroom', 'Bathroom', 'Car Park space',
@@ -102,7 +100,9 @@ def train_model():
     }
     return pipeline, metadata
 
-# Show a spinner while training on first load
+# =========================================================
+# LOAD / TRAIN
+# =========================================================
 with st.spinner("Loading model... (first load takes ~15 seconds)"):
     pipeline, meta = train_model()
 
@@ -170,14 +170,14 @@ st.divider()
 
 if st.button("Predict price", type="primary", use_container_width=True):
 
-    # ---- Derived features ----
+    # Derived features
     log_land_size  = np.log1p(land_size)
     ref            = pd.Timestamp(meta['reference_date'])
     days_since_ref = (pd.Timestamp(sale_date) - ref).days
     latitude       = SUBURB_DEFAULTS[suburb]['lat']
     longitude      = SUBURB_DEFAULTS[suburb]['lon']
 
-    # ---- Build input row ----
+    # Build input row — all columns start at 0
     row = {col: 0 for col in meta['numeric_features'] + meta['dummy_features']}
 
     row['Latitude']        = latitude
@@ -190,23 +190,23 @@ if st.button("Predict price", type="primary", use_container_width=True):
     row['days_since_ref']  = days_since_ref
     row['log_land_size']   = log_land_size
 
-    # Suburb dummy (Oakleigh = baseline, both dummies = 0)
+    # Suburb dummy (Oakleigh = baseline)
     if suburb == 'Reservoir':
         row['Suburb_Reservoir'] = 1
     elif suburb == 'Thornbury':
         row['Suburb_Thornbury'] = 1
 
-    # Type dummy (apartment = baseline, all type dummies = 0)
+    # Type dummy (apartment = baseline)
     type_col = f'Type_{prop_type}'
     if type_col in row:
         row[type_col] = 1
 
-    # ---- Predict ----
+    # Predict
     input_df       = pd.DataFrame([row])[meta['numeric_features'] + meta['dummy_features']]
     log_price_pred = pipeline.predict(input_df)[0]
     price_pred     = np.expm1(log_price_pred)
 
-    # ---- Display ----
+    # Display result
     st.success(f"### Predicted price: **${price_pred:,.0f}**")
 
     rmse_log = 0.15
@@ -214,7 +214,8 @@ if st.button("Predict price", type="primary", use_container_width=True):
     high = np.expm1(log_price_pred + rmse_log)
     st.caption(
         f"Typical 68% confidence range: **${low:,.0f} – ${high:,.0f}**  \n"
-        f"_Based on model RMSE ≈ {rmse_log:.2f} log-price units (~{round((np.exp(rmse_log)-1)*100)}%)._"
+        f"_Based on model RMSE ≈ {rmse_log:.2f} log-price units "
+        f"(~{round((np.exp(rmse_log)-1)*100)}%)._"
     )
 
     with st.expander("See model inputs"):
