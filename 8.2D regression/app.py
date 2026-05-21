@@ -10,6 +10,8 @@ import warnings
 warnings.filterwarnings('ignore')
 from datetime import date
 
+APP_DIR = os.path.dirname(os.path.abspath(__file__))   # ← ADD THIS
+
 # =========================================================
 # PAGE CONFIG
 # =========================================================
