@@ -38,7 +38,7 @@ def train_model():
     from xgboost import XGBRegressor
 
     # ---- Clean ----
-    df = pd.read_csv("housing_enriched.csv")
+    df = pd.read_csv(os.path.join(APP_DIR, "housing_enriched.csv"))  # ← CHANGE THIS
     df.columns = df.columns.str.strip()
     df = df[df['Y = Sold price'] != 'Contact agent'].copy()
     df['price'] = (
