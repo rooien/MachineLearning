@@ -1,11 +1,13 @@
 """
 House Price Prediction — Streamlit demo
+Self-contained: retrains model on startup so no .joblib files needed.
 Run with:  streamlit run app.py
 """
 import streamlit as st
 import pandas as pd
 import numpy as np
-import joblib
+import warnings
+warnings.filterwarnings('ignore')
 from datetime import date
 
 # =========================================================
@@ -18,18 +20,92 @@ st.set_page_config(
 )
 
 # =========================================================
-# LOAD MODEL (cached so it loads once, not on every interaction)
+# TRAIN MODEL ON STARTUP (cached — only runs once per session)
 # =========================================================
 @st.cache_resource
-def load_model():
-    pipeline = joblib.load('house_price_model.joblib')
-    metadata = joblib.load('model_metadata.joblib')
+def train_model():
+    """
+    Load data, clean, and train the XGBoost pipeline.
+    @st.cache_resource means this only runs ONCE when the app starts,
+    then the result is reused for every subsequent interaction.
+    """
+    from sklearn.model_selection import train_test_split
+    from sklearn.pipeline import Pipeline
+    from sklearn.compose import ColumnTransformer
+    from sklearn.preprocessing import StandardScaler
+    from xgboost import XGBRegressor
+
+    # ---- Clean ----
+    df = pd.read_csv("housing_enriched.csv")
+    df.columns = df.columns.str.strip()
+    df = df[df['Y = Sold price'] != 'Contact agent'].copy()
+    df['price'] = (
+        df['Y = Sold price']
+          .str.replace('$', '', regex=False)
+          .str.replace(',', '', regex=False)
+          .astype(float)
+    )
+    df = df.drop(columns=['Y = Sold price'])
+    df['Last sold date'] = pd.to_datetime(df['Last sold date'])
+    df['days_since_ref'] = (
+        df['Last sold date'] - pd.Timestamp('2000-01-01')
+    ).dt.days
+    df = df.drop(columns=['URL', 'Address', 'Postcode', 'Last sold date'])
+    df['log_price']     = np.log1p(df['price'])
+    df['log_land_size'] = np.log1p(df['Land size'])
+    df = df.drop(columns=['price', 'Land size'])
+    df = pd.get_dummies(df, columns=['Suburb', 'Type'], drop_first=True, dtype=int)
+
+    y = df['log_price']
+    X = df.drop(columns=['log_price'])
+    X_train, _, y_train, _ = train_test_split(X, y, test_size=0.2, random_state=42)
+
+    # ---- Pipeline ----
+    numeric_features = [
+        'Latitude', 'Longitude',
+        'Bedroom', 'Bathroom', 'Car Park space',
+        'primary_school', 'secondary_school', 'preschool',
+        'train_station', 'distance_to_cbd',
+        'days_since_ref', 'log_land_size'
+    ]
+    dummy_features = [c for c in X.columns if c not in numeric_features]
+
+    preprocessor = ColumnTransformer([
+        ('num', StandardScaler(), numeric_features),
+        ('dum', 'passthrough', dummy_features),
+    ])
+
+    pipeline = Pipeline([
+        ('pre', preprocessor),
+        ('model', XGBRegressor(
+            n_estimators=200,
+            learning_rate=0.1,
+            max_depth=3,
+            subsample=0.8,
+            random_state=42,
+            verbosity=0
+        ))
+    ])
+    pipeline.fit(X_train, y_train)
+
+    metadata = {
+        'numeric_features': numeric_features,
+        'dummy_features':   dummy_features,
+        'suburbs':  ['Oakleigh', 'Reservoir', 'Thornbury'],
+        'types':    ['apartment', 'house', 'townhouse', 'unit', 'unitblock', 'villa'],
+        'reference_date': '2000-01-01',
+        'defaults': {
+            'train_station': int(X_train['train_station'].median()),
+        }
+    }
     return pipeline, metadata
 
-pipeline, meta = load_model()
+# Show a spinner while training on first load
+with st.spinner("Loading model... (first load takes ~15 seconds)"):
+    pipeline, meta = train_model()
 
 # =========================================================
-# SUBURB DEFAULTS — lat/long + CBD distance per suburb
+# SUBURB DEFAULTS
 # =========================================================
 SUBURB_DEFAULTS = {
     'Oakleigh':  {'lat': -37.899, 'lon': 145.094, 'cbd_m': 14600},
@@ -99,49 +175,46 @@ if st.button("Predict price", type="primary", use_container_width=True):
     latitude       = SUBURB_DEFAULTS[suburb]['lat']
     longitude      = SUBURB_DEFAULTS[suburb]['lon']
 
-    # ---- Build input row (all columns default to 0, then fill in) ----
+    # ---- Build input row ----
     row = {col: 0 for col in meta['numeric_features'] + meta['dummy_features']}
 
-    # Numeric features
-    row['Latitude']         = latitude
-    row['Longitude']        = longitude
-    row['Bedroom']          = bedrooms
-    row['Bathroom']         = bathrooms
-    row['Car Park space']   = car_parks
-    row['train_station']    = train_stations
-    row['distance_to_cbd']  = distance_to_cbd
-    row['days_since_ref']   = days_since_ref
-    row['log_land_size']    = log_land_size
+    row['Latitude']        = latitude
+    row['Longitude']       = longitude
+    row['Bedroom']         = bedrooms
+    row['Bathroom']        = bathrooms
+    row['Car Park space']  = car_parks
+    row['train_station']   = train_stations
+    row['distance_to_cbd'] = distance_to_cbd
+    row['days_since_ref']  = days_since_ref
+    row['log_land_size']   = log_land_size
 
-    # Suburb dummy (Oakleigh is the baseline — both dummies = 0)
+    # Suburb dummy (Oakleigh = baseline, both dummies = 0)
     if suburb == 'Reservoir':
         row['Suburb_Reservoir'] = 1
     elif suburb == 'Thornbury':
         row['Suburb_Thornbury'] = 1
 
-    # Type dummy (apartment is the baseline — all type dummies = 0)
+    # Type dummy (apartment = baseline, all type dummies = 0)
     type_col = f'Type_{prop_type}'
     if type_col in row:
         row[type_col] = 1
 
     # ---- Predict ----
-    input_df      = pd.DataFrame([row])[meta['numeric_features'] + meta['dummy_features']]
+    input_df       = pd.DataFrame([row])[meta['numeric_features'] + meta['dummy_features']]
     log_price_pred = pipeline.predict(input_df)[0]
     price_pred     = np.expm1(log_price_pred)
 
-    # ---- Display result ----
+    # ---- Display ----
     st.success(f"### Predicted price: **${price_pred:,.0f}**")
 
-    # Confidence range — ±1 RMSE in log space (model RMSE ≈ 0.15 for XGBoost)
     rmse_log = 0.15
     low  = np.expm1(log_price_pred - rmse_log)
     high = np.expm1(log_price_pred + rmse_log)
     st.caption(
         f"Typical 68% confidence range: **${low:,.0f} – ${high:,.0f}**  \n"
-        f"_Based on the model's RMSE of ~{rmse_log:.2f} log-price units (≈{round((np.exp(rmse_log)-1)*100)}%)._"
+        f"_Based on model RMSE ≈ {rmse_log:.2f} log-price units (~{round((np.exp(rmse_log)-1)*100)}%)._"
     )
 
-    # Show the inputs used (useful for debugging and transparency)
     with st.expander("See model inputs"):
         st.dataframe(input_df.T.rename(columns={0: 'value'}))
 
@@ -150,7 +223,6 @@ if st.button("Predict price", type="primary", use_container_width=True):
 # =========================================================
 st.divider()
 st.caption(
-    "Trained on Melbourne property data (~1,800 sales across Oakleigh, Reservoir, Thornbury). "
-    "Model: XGBoost with one-hot encoded categoricals, log-transformed price and land size. "
-    "R² ≈ 0.83 | Median error ≈ 8.7%."
+    "Model: XGBoost | R² ≈ 0.83 | Median error ≈ 8.7% | "
+    "Trained on ~1,800 Melbourne property sales (Oakleigh, Reservoir, Thornbury)."
 )
